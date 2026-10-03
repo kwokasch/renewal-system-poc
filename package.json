@@ -1,0 +1,21 @@
+{
+  "name": "renewal-system-poc",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute renewal-db --local --file=./src/schema.sql",
+    "db:seed": "wrangler d1 execute renewal-db --local --file=./src/seed.sql"
+  },
+  "dependencies": {
+    "ai": "^4.0.0",
+    "workers-ai-provider": "^0.2.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.99.0"
+  }
+}

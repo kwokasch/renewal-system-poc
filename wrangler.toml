@@ -1,0 +1,55 @@
+name = "renewal-system-poc"
+main = "src/index.ts"
+compatibility_date = "2024-12-05"
+compatibility_flags = ["nodejs_compat"]
+
+# Cron trigger: reconciliation sweep (backup, not primary trigger)
+# Runs daily at 6am UTC — catches anything DOs missed
+[triggers]
+crons = ["0 6 * * *"]
+
+# Workers AI — powers the conversational agent
+[ai]
+binding = "AI"
+
+# Static assets — chat UI served from /public
+[assets]
+directory = "./public"
+
+# D1 Database — domain state + audit trail
+[[d1_databases]]
+binding = "DB"
+database_name = "renewal-db"
+database_id = "145cea74-889a-45e7-9814-bfd1578f79b2"
+
+# Durable Objects — per-domain timers, circuit breakers
+[durable_objects]
+bindings = [
+  { name = "DOMAIN_RENEWAL", class_name = "DomainRenewal" },
+  { name = "REGISTRY_BREAKER", class_name = "RegistryCircuitBreaker" },
+]
+
+# Migrations — v1 already applied (DomainRenewal exists), v2 adds circuit breaker
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DomainRenewal"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RegistryCircuitBreaker"]
+
+# Queue — decouples renewal trigger from workflow execution
+[[queues.producers]]
+queue = "renewal-queue"
+binding = "RENEWAL_QUEUE"
+
+[[queues.consumers]]
+queue = "renewal-queue"
+max_batch_size = 10
+max_batch_timeout = 30
+
+# Workflow — durable multi-step renewal execution
+[[workflows]]
+name = "renewal-workflow"
+binding = "RENEWAL_WORKFLOW"
+class_name = "RenewalWorkflow"

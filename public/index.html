@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Domain Renewal Agent</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e4e4e7;
+      --text-muted: #71717a;
+      --accent: #f97316;
+      --accent-dim: #f9731620;
+      --user-bg: #2563eb;
+      --success: #22c55e;
+      --danger: #ef4444;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    header .logo {
+      width: 32px;
+      height: 32px;
+      background: var(--accent);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    header .status {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    header .status .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+
+    header .status .dot.connected { background: var(--success); }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .message {
+      max-width: 85%;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user-bg);
+      padding: 10px 16px;
+      border-radius: 16px 16px 4px 16px;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--surface);
+      padding: 12px 16px;
+      border-radius: 16px 16px 16px 4px;
+      border: 1px solid var(--border);
+    }
+
+    .message.assistant pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+
+    .message.assistant code {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 13px;
+    }
+
+    .message.assistant p { margin-bottom: 8px; }
+    .message.assistant p:last-child { margin-bottom: 0; }
+
+    .message.assistant ul, .message.assistant ol {
+      margin: 8px 0;
+      padding-left: 20px;
+    }
+
+    .message.assistant strong { color: var(--accent); }
+
+    .tool-call {
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      background: var(--accent-dim);
+      border-left: 2px solid var(--accent);
+      border-radius: 0 6px 6px 0;
+      margin: 4px 0;
+      align-self: flex-start;
+    }
+
+    .tool-result {
+      align-self: flex-start;
+      max-width: 95%;
+      margin: 4px 0;
+    }
+
+    .tool-result table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .tool-result th {
+      text-align: left;
+      padding: 8px 12px;
+      background: var(--bg);
+      color: var(--text-muted);
+      font-weight: 500;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .tool-result td {
+      padding: 8px 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .badge.expired { background: #ef444430; color: #ef4444; }
+    .badge.critical { background: #ef444430; color: #ef4444; }
+    .badge.urgent { background: #f9731630; color: #f97316; }
+    .badge.ok { background: #22c55e30; color: #22c55e; }
+
+    .typing {
+      align-self: flex-start;
+      color: var(--text-muted);
+      font-size: 14px;
+      padding: 8px 0;
+    }
+
+    .typing span {
+      animation: blink 1.4s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.2s; }
+    .typing span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes blink {
+      0%, 60%, 100% { opacity: 0.2; }
+      30% { opacity: 1; }
+    }
+
+    #input-area {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    #input-area form {
+      display: flex;
+      gap: 10px;
+    }
+
+    #input-area input {
+      flex: 1;
+      padding: 12px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    #input-area input:focus {
+      border-color: var(--accent);
+    }
+
+    #input-area input::placeholder { color: var(--text-muted); }
+
+    #input-area button {
+      padding: 12px 20px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    #input-area button:hover { opacity: 0.9; }
+    #input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 20px 0;
+    }
+
+    .suggestions button {
+      padding: 8px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      color: var(--text-muted);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .suggestions button:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">🌐</div>
+    <h1>Domain Renewal Agent</h1>
+    <div class="status">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">Connecting...</span>
+    </div>
+  </header>
+
+  <div id="messages">
+    <div class="message assistant">
+      <p>Hi! I'm your domain management assistant. I can help you:</p>
+      <ul>
+        <li>Check on your domains and their expiry dates</li>
+        <li>Trigger manual renewals</li>
+        <li>Review renewal history and troubleshoot failures</li>
+        <li>Monitor registry circuit breaker status</li>
+        <li>Register new domains</li>
+      </ul>
+      <p>What would you like to do?</p>
+    </div>
+  </div>
+
+  <div class="suggestions" id="suggestions">
+    <button onclick="sendSuggestion(this)">Show my domains</button>
+    <button onclick="sendSuggestion(this)">What's expiring soon?</button>
+    <button onclick="sendSuggestion(this)">Check circuit breaker for .com</button>
+    <button onclick="sendSuggestion(this)">Any dead-letter items?</button>
+  </div>
+
+  <div id="input-area">
+    <form id="chat-form">
+      <input type="text" id="chat-input" placeholder="Ask about your domains..." autocomplete="off" />
+      <button type="submit" id="send-btn">Send</button>
+    </form>
+  </div>
+
+  <script type="module">
+    // ── Chat client using fetch streaming (works without agents/client) ──
+
+    const messagesEl = document.getElementById('messages');
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('send-btn');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const suggestionsEl = document.getElementById('suggestions');
+
+    let messages = [];
+    let isStreaming = false;
+
+    // Mark connected
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Connected';
+
+    function scrollToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addUserMessage(text) {
+      const el = document.createElement('div');
+      el.className = 'message user';
+      el.textContent = text;
+      messagesEl.appendChild(el);
+      scrollToBottom();
+    }
+
+    function addToolCall(name) {
+      const el = document.createElement('div');
+      el.className = 'tool-call';
+      el.textContent = `⚡ Calling ${name}...`;
+      messagesEl.appendChild(el);
+      scrollToBottom();
+      return el;
+    }
+
+    function createAssistantBubble() {
+      const el = document.createElement('div');
+      el.className = 'message assistant';
+      messagesEl.appendChild(el);
+      scrollToBottom();
+      return el;
+    }
+
+    function addTypingIndicator() {
+      const el = document.createElement('div');
+      el.className = 'typing';
+      el.id = 'typing';
+      el.innerHTML = '<span>●</span><span>●</span><span>●</span>';
+      messagesEl.appendChild(el);
+      scrollToBottom();
+      return el;
+    }
+
+    function removeTypingIndicator() {
+      const el = document.getElementById('typing');
+      if (el) el.remove();
+    }
+
+    // Simple markdown-ish rendering
+    function renderMarkdown(text) {
+      // Escape HTML first
+      const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return escaped
+        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n\n/g, '</p><p>')
+        .replace(/\n- /g, '<br>• ')
+        ;
+    }
+
+    function renderToolResult(toolName, result) {
+      const el = document.createElement('div');
+      el.className = 'tool-result';
+
+      if (toolName === 'listDomains' && Array.isArray(result)) {
+        const rows = result.map(d => {
+          const badge = `<span class="badge ${d.urgency.toLowerCase()}">${d.urgency}</span>`;
+          return `<tr><td><strong>${d.domain}</strong></td><td>${d.expiryDate}</td><td>${d.daysUntilExpiry} days</td><td>${d.renewalPrice}/yr</td><td>${d.autoRenew ? '✅' : '❌'}</td><td>${badge}</td></tr>`;
+        }).join('');
+        el.innerHTML = `<table><tr><th>Domain</th><th>Expires</th><th>Days Left</th><th>Price</th><th>Auto</th><th>Status</th></tr>${rows}</table>`;
+      } else if (result && result.error) {
+        el.innerHTML = `<p style="color:var(--danger);padding:8px 12px;">❌ ${result.error}</p>`;
+      } else if (toolName === 'getDomainDetails' && result.domain) {
+        const d = result.domain;
+        const badge = `<span class="badge ${d.urgency.toLowerCase()}">${d.urgency}</span>`;
+        el.innerHTML = `<table>
+          <tr><th colspan="2">${d.name} ${badge}</th></tr>
+          <tr><td>Expires</td><td>${d.expiryDate} (${d.daysUntilExpiry} days)</td></tr>
+          <tr><td>Price</td><td>${d.renewalPrice}/yr</td></tr>
+          <tr><td>Auto-Renew</td><td>${d.autoRenew ? 'Yes' : 'No'}</td></tr>
+          <tr><td>Account</td><td>${d.accountId}</td></tr>
+        </table>`;
+      } else if (toolName === 'getRenewalHistory' && result.message && !result.renewals) {
+        el.innerHTML = `<p style="color:var(--text-muted);padding:8px 12px;">📋 ${result.message}</p>`;
+      } else if (toolName === 'getRenewalHistory' && result.renewals) {
+        const rows = result.renewals.map(h => {
+          const statusBadge = h.status === 'success' ? 'ok' : h.status === 'payment_failed' ? 'expired' : 'urgent';
+          return `<tr><td><span class="badge ${statusBadge}">${h.status}</span></td><td>${h.action}</td><td>${h.triggerSource}</td><td>${h.amountCharged != null ? '$' + h.amountCharged : '-'}</td><td>${h.createdAt?.split('T')[0] || '-'}</td><td>${h.errorMessage || '-'}</td></tr>`;
+        }).join('');
+        el.innerHTML = `<table><tr><th>Status</th><th>Action</th><th>Trigger</th><th>Amount</th><th>Date</th><th>Error</th></tr>${rows}</table>`;
+      } else if (toolName === 'getCircuitBreakerStatus') {
+        const state = result.status || result.state || 'UNKNOWN';
+        const badgeClass = state === 'CLOSED' ? 'ok' : state === 'OPEN' ? 'expired' : 'urgent';
+        el.innerHTML = `<table>
+          <tr><th colspan="2">Circuit Breaker: .${result.tld}</th></tr>
+          <tr><td>State</td><td><span class="badge ${badgeClass}">${state}</span></td></tr>
+          <tr><td>Failures</td><td>${result.failCount ?? result.failureCount ?? 0}</td></tr>
+        </table>`;
+      } else if (toolName === 'getDeadLetterItems') {
+        if (result.message) {
+          el.innerHTML = `<p style="color:var(--success);padding:8px 12px;">✅ ${result.message}</p>`;
+        } else {
+          const rows = result.items.map(i => `<tr><td>${i.domain}</td><td>${i.error}</td><td>${i.paymentRefunded ? '✅' : '❌'}</td><td>${i.createdAt}</td></tr>`).join('');
+          el.innerHTML = `<table><tr><th>Domain</th><th>Error</th><th>Refunded</th><th>Date</th></tr>${rows}</table>`;
+        }
+      } else if (toolName === 'renewDomain') {
+        el.innerHTML = `<table>
+          <tr><th colspan="2">Renewal Queued</th></tr>
+          <tr><td>Status</td><td><span class="badge ok">${result.status}</span></td></tr>
+          <tr><td>Message</td><td>${result.message}</td></tr>
+          <tr><td>Price</td><td>$${result.renewalPrice}</td></tr>
+          <tr><td>Pipeline</td><td style="font-size:11px">${result.pipeline}</td></tr>
+        </table>`;
+      } else if (toolName === 'registerDomain') {
+        if (result.error) {
+          el.innerHTML = `<p style="color:var(--danger);padding:8px 12px;">❌ ${result.error}</p>`;
+        } else {
+          el.innerHTML = `<table>
+            <tr><th colspan="2">Domain Registered</th></tr>
+            <tr><td>Message</td><td>${result.message}</td></tr>
+            <tr><td>Expires</td><td>${result.expiresAt}</td></tr>
+            <tr><td>Renewal Alarm</td><td>${result.renewalAlarmAt}</td></tr>
+            <tr><td>Price</td><td>$${result.renewalPrice}/yr</td></tr>
+          </table>`;
+        }
+      } else {
+        // Fallback: show as JSON
+        el.innerHTML = `<pre style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow-x:auto;">${JSON.stringify(result, null, 2)}</pre>`;
+      }
+
+      messagesEl.appendChild(el);
+      scrollToBottom();
+    }
+
+    async function sendMessage(text) {
+      if (isStreaming || !text.trim()) return;
+      isStreaming = true;
+      sendBtn.disabled = true;
+      suggestionsEl.style.display = 'none';
+
+      messages.push({ role: 'user', content: text });
+      addUserMessage(text);
+      input.value = '';
+
+      addTypingIndicator();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages }),
+        });
+
+        removeTypingIndicator();
+
+        if (!res.ok) {
+          const errBubble = createAssistantBubble();
+          errBubble.innerHTML = `<p>Sorry, something went wrong (${res.status}). Please try again.</p>`;
+          isStreaming = false;
+          sendBtn.disabled = false;
+          return;
+        }
+
+        // Stream the response
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let assistantBubble = null;
+        let fullText = '';
+        let buffer = '';
+        let lastToolName = null;
+        let hasRenderedToolResult = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            // Vercel AI SDK data stream: prefix is a single char + ':'
+            // 0 = text, 9 = tool_call, a = tool_result, others we skip
+            const match = line.match(/^([0-9a-f]):(.*)/s);
+            if (!match) continue;
+            const prefix = match[1];
+            const data = match[2];
+            if (prefix !== '0' && prefix !== '9' && prefix !== 'a') continue;
+
+            try {
+              if (prefix === '0') {
+                // Text delta — skip if we already showed a tool result table
+                if (hasRenderedToolResult) continue;
+                const text = JSON.parse(data);
+                if (!assistantBubble) assistantBubble = createAssistantBubble();
+                fullText += text;
+                assistantBubble.innerHTML = renderMarkdown(fullText);
+                scrollToBottom();
+              } else if (prefix === '9') {
+                // Tool call
+                const toolData = JSON.parse(data);
+                if (toolData.toolName) {
+                  lastToolName = toolData.toolName;
+                  addToolCall(toolData.toolName);
+                }
+              } else if (prefix === 'a') {
+                // Tool result — render as formatted card
+                const toolResult = JSON.parse(data);
+                if (toolResult.result && lastToolName) {
+                  renderToolResult(lastToolName, toolResult.result);
+                  hasRenderedToolResult = true;
+                }
+              }
+            } catch (e) {
+              // Skip unparseable lines
+            }
+          }
+        }
+
+        if (fullText) {
+          messages.push({ role: 'assistant', content: fullText });
+        }
+
+      } catch (err) {
+        removeTypingIndicator();
+        const errBubble = createAssistantBubble();
+        errBubble.innerHTML = `<p>Connection error. Please try again.</p>`;
+        console.error(err);
+      }
+
+      isStreaming = false;
+      sendBtn.disabled = false;
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendMessage(input.value);
+    });
+
+    // Expose for suggestion buttons
+    window.sendSuggestion = function(btn) {
+      sendMessage(btn.textContent);
+    };
+  </script>
+</body>
+</html>
