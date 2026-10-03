@@ -2,11 +2,13 @@
 
 How I used AI tools (Claude, Gemini) to design and build this domain renewal system POC — and what that process reveals about how I'd lead engineering teams using AI-assisted development.
 
+*This document summarizes the key prompts and decision points from my AI-assisted development process. A full session transcript is available on request.*
+
 ## 1. System Architecture Design
 
 ### Prompt: "Design a domain renewal system on Cloudflare Workers"
 
-**What I asked:** I needed a proof-of-concept that demonstrated distributed systems patterns relevant to domain registrar infrastructure — specifically the kind of thing Cloudflare Registrar deals with: millions of domains, each with independent renewal lifecycles, where missed renewals have real business impact.
+**What I asked:** I needed a proof-of-concept that demonstrated distributed systems patterns relevant to domain registrar infrastructure, specifically the kind of thing Cloudflare Registrar deals with: millions of domains, each with independent renewal lifecycles, where missed renewals have real business impact.
 
 **What AI helped with:**
 - Mapped the problem to Cloudflare primitives: Durable Objects for per-domain state machines, Workflows for durable multi-step execution, Queues for decoupling triggers from processing, D1 for the persistence layer
