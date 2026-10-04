@@ -94,7 +94,7 @@ export class DomainRenewal extends DurableObject<Env> {
       console.log(`[DO] Enqueued renewal for ${domainName} (attempt ${attempts + 1})`);
 
       // Schedule a follow-up alarm in 24h to retry if renewal didn't complete
-      // This creates the multi-day retry window (like name.com's 7d → 1d → day-of)
+      // This creates the multi-day retry window (i.e. 7d → 1d → day-of)
       const nextCheck = Date.now() + ONE_DAY_MS;
       if (nextCheck < expiresAt) {
         await this.ctx.storage.setAlarm(nextCheck);

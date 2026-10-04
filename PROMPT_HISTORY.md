@@ -16,7 +16,7 @@ How I used AI tools (Claude, Gemini) to design and build this domain renewal sys
 - Surfaced the circuit breaker pattern early: registries go down, and without a breaker you get thundering-herd retries across thousands of domains hitting the same dead endpoint
 
 **What I brought:**
-- Domain industry knowledge from my experience at Name.com — real renewal timing patterns (7-day window → daily retries → day-of), the EPP protocol flow, why payment-before-registry is the right order (refund is cheaper than a double-renew)
+- Domain industry knowledge from experience: real renewal timing patterns (7-day window → daily retries → day-of), the EPP protocol flow, why payment-before-registry is the right order (refund is cheaper than a double-renew)
 - The insight that Durable Objects are a natural fit for per-domain scheduling — each domain is an independent state machine, which maps 1:1 to the DO model. This eliminates the central batch job / thundering herd problem that traditional cron-based systems have
 - Operational requirements: idempotency keys, dead-letter queues for the payment-charged-but-registry-failed case, audit trails on every attempt
 
