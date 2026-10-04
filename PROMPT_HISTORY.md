@@ -63,7 +63,7 @@ How I used AI tools (Claude, Gemini) to design and build this domain renewal sys
 
 **What I brought:**
 - The decision to use a Durable Object instead of KV — circuit breaker state transitions need to be atomic (check-and-update in one operation). KV's eventual consistency means two workflows could both read "CLOSED" and both trip the breaker, or worse, both try to transition HALF_OPEN → CLOSED simultaneously
-- The failure window concept: reset the fail counter if no failures occur for 1 minute, so transient blips don't accumulate toward the threshold
+- The failure window concept: failures only count toward the threshold if they are recent (5 minutes, longer than the workflow's longest retry backoff), so transient blips don't accumulate
 
 ## 3. AI Agent & Ops Interface
 
@@ -105,6 +105,26 @@ How I used AI tools (Claude, Gemini) to design and build this domain renewal sys
 **What went wrong:** The Durable Object's `getState()` returns `{ status: "CLOSED" }`, but the renderer was checking `result.state` (wrong field name). Similarly, `failCount` vs `failureCount`.
 
 **The fix:** Updated the renderer to check `result.status || result.state` with a fallback chain. This kind of defensive field access is standard practice when multiple components evolve independently.
+
+### Prompt: "Test the circuit breaker end to end"
+
+Running a real failure test (a domain the simulator treats as "registry down") exposed problems I would not have found by reading the code:
+
+- **Workflow instance IDs rejected dotted domain names.** The idempotency key embeds the domain, and Workflows only accept letters, digits, `_` and `-`. No renewal for any `.com` domain could start a workflow, so the manual and alarm paths had never worked end to end. Fix: derive a valid, deterministic instance ID (sanitised key plus a short hash) while keeping the original key in the database.
+- **The simulator's EPP info always looked "already renewed".** Most domains skipped the registry call entirely. Fix: the registry reports the expiry on file, renews extend from the current expiry, and the guard has its own test hook.
+- **The failure window was shorter than the retry backoff.** A 60-second window against 30s/60s/120s retries meant one workflow's retries could reset the counter and the breaker might never trip. Fix: 5-minute window.
+
+### Prompt: "Which EPP response codes should trip the breaker?"
+
+I pointed the design at a registry's published response-code documentation (Nominet's) and asked which codes mean the registry is unhealthy and which mean a problem with one domain. That led to a classification: infrastructure codes (2400, 2500, 2502) and timeouts trip the breaker and retry, auth failures (2501) open it immediately without retries, and domain-level errors (22xx and 23xx) fail only that renewal. Before this, timeouts (the most common real failure) never reached the breaker, while a "domain not found" could have opened it for a whole TLD.
+
+I also lowered the failure threshold from 5 to 3 for the POC, since each retry counts as a failure and a registry returning 2400 will do so for every domain.
+
+### Prompt: "Is a pre-flight check expensive, and what does it actually check?"
+
+I pushed back on a suggestion to check the breaker before payment: is the check itself costly, and is the breaker per workflow or shared? Working through that, I confirmed the breaker is shared per TLD, that the check is a cheap internal call and not a registry call, and that its risks are a hot spot on busy TLDs and being blind to failures not yet reported. Testing then showed about $140 held across 11 in-flight renewals while the breaker was open, which settled it. The pre-flight is read-only (`peekRegistry`), waits out the cooldown with a durable sleep, and exits without charging if the registry is still down. I also had it renamed from "registry health" to "circuit breaker" pre-flight, because it reads recorded state and never contacts the registry.
+
+**Lesson:** the AI proposed most of the fixes, but every one of them started from something I observed, questioned, or tested. The log from a deliberate failure test was worth more than any amount of code review.
 
 ## 5. How This Informs My Leadership Approach
 

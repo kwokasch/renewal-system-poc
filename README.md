@@ -4,6 +4,8 @@ A proof-of-concept domain auto-renewal system built on **Cloudflare Workers**, *
 
 **[Live Demo →](https://renewal-system-poc.katie-wokasch.workers.dev)**
 
+New here? **[TESTING.md](./TESTING.md)** walks through trying the system, including how to trigger each failure path.
+
 ## Architecture
 
 ```
@@ -44,28 +46,29 @@ A proof-of-concept domain auto-renewal system built on **Cloudflare Workers**, *
 │                     (Durable Execution)                             │
 │                                                                     │
 │    ┌───────────┐   ┌───────────┐   ┌───────────┐   ┌───────────┐    │
-│    │  Step 1   │   │  Step 2   │   │  Step 3   │   │  Step 4   │    │
-│    │  Check    │──▶│  Process  │──▶│  Registry │──▶│  Update   │    │
-│    │Eligibility│   │  Payment  │   │  Renew    │   │  Records  │    │
-│    │           │   │           │   │  (EPP)    │   │           │    │
-│    │• Idemp.   │   │• Charge   │   │• Circuit  │   │• D1 batch │    │
-│    │  guard    │   │  balance  │   │  breaker  │   │• Update   │    │
-│    │• Domain   │   │• Retry ×3 │   │• Retry ×3 │   │  DO alarm │    │
-│    │  status   │   │• Fail on  │   │• Exp.     │   │           │    │
-│    │• Audit    │   │  insuff.  │   │  backoff  │   │           │    │
-│    │  record   │   │  balance  │   │           │   │           │    │
-│    └───────────┘   └───────────┘   └───────────┘   └─────┬─────┘    │
-│                          │                               │          │
-│                    ┌─────▼─────┐                         ▼          │
-│                    │Dead Letter│                   ┌────────────┐   │
-│                    │  Queue    │                   │  Step 5    │   │
-│                    │(payment   │                   │  Send      │   │
-│                    │ charged,  │                   │Confirmation│   │
-│                    │ registry  │                   └────────────┘   │
-│                    │ failed →  │                                    │
-│                    │ auto-     │                                    │
-│                    │ refund)   │                                    │
-│                    └───────────┘                                    │
+│    │   Step 1  │   │  Step 1b  │   │   Step 2  │   │   Step 3  │    │
+│    │   Check   │   │  Breaker  │   │  Process  │   │  Registry │    │
+│    │Eligibility│   │ Pre-flight│   │  Payment  │   │Renew (EPP)│    │
+│    │           │   │           │   │           │   │           │    │
+│    │• Idemp.   │   │• Read-only│   │• Charge   │   │• Breaker  │    │
+│    │  guard    │──▶│  peek     │──▶│  balance  │──▶│  probe    │    │
+│    │• Domain   │   │• Sleep if │   │• Retry ×3 │   │• EPP info │    │
+│    │  status   │   │  OPEN     │   │• Fail on  │   │  guard    │    │
+│    │• Audit    │   │• Not      │   │  insuff.  │   │• Classify │    │
+│    │  record   │   │  charged  │   │  balance  │   │  errors   │    │
+│    └───────────┘   └───────────┘   └───────────┘   └───────────┘    │
+│                                                                     │
+│    (Step 3 success continues to Step 4)                             │
+│                                                                     │
+│    ┌───────────┐   ┌───────────┐   ┌─────────────────────────────┐  │
+│    │   Step 4  │   │   Step 5  │   │ Dead Letter (on failure)    │  │
+│    │   Update  │──▶│    Send   │   │                             │  │
+│    │  Records  │   │  Confirm  │   │ Registry failed after       │  │
+│    │           │   └───────────┘   │ payment was taken:          │  │
+│    │• D1 batch │                   │ • Refund payment            │  │
+│    │• Update   │                   │ • Record for follow-up      │  │
+│    │  DO alarm │                   │ • Skips Steps 4 and 5       │  │
+│    └───────────┘                   └─────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -105,7 +108,7 @@ A proof-of-concept domain auto-renewal system built on **Cloudflare Workers**, *
 │  │  Renewal attempt tracking       States: CLOSED → OPEN →      │   │
 │  │  Domain lifecycle state           HALF_OPEN → CLOSED         │   │
 │  │                                 Prevents thundering herd     │   │
-│  │                                 Fail-fast when registry down │   │
+│  │                                 Opens: 3 failures/5 min      │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -139,7 +142,9 @@ The chat UI renders tool results as styled cards with urgency badges, status ind
 | **Durable execution** | Workflow steps are independently retryable. A payment that succeeds is never re-executed, even if the registry call after it fails. |
 | **Independent scheduling** | Each domain's Durable Object sets its own alarm — no central batch job, no thundering herd, no shared state. |
 | **Defense in depth** | Primary trigger (DO alarm) + backup trigger (cron sweep) + manual trigger (API) + AI agent. Same queue, same workflow. |
-| **Circuit breaker** | Per-TLD Durable Objects prevent thundering-herd retries when a registry is down. CLOSED → OPEN (fail-fast) → HALF_OPEN (test recovery) → CLOSED. |
+| **Circuit breaker** | Per-TLD Durable Objects prevent thundering-herd retries when a registry is down. Opens after 3 failures within 5 minutes; CLOSED → OPEN (fail-fast) → HALF_OPEN (test recovery) → CLOSED, with escalating cooldowns (1m, 2m, 4m… capped at 30m). |
+| **Breaker pre-flight** | Before taking payment, the workflow reads the breaker's recorded state (read-only; it never contacts the registry). If open, it sleeps durably instead of charging the customer and refunding later. |
+| **EPP error classification** | Failures are classified by result code: infrastructure (2400/2500/2502) trips the breaker and retries, auth (2501) opens it immediately and alerts, domain-level errors (22xx/23xx) fail only that renewal and never trip the shared breaker. |
 | **Dead-letter queue** | Renewals where payment succeeded but registry failed are captured with automatic refund, flagged for manual investigation. |
 | **Audit trail** | Every attempt is recorded in `renewal_history` with trigger source, outcome, and registry response. |
 | **Graceful failure** | Payment failures are business outcomes (don't retry). Registry timeouts retry with exponential backoff. Queue failures retry with per-message ack/nack. |
@@ -176,12 +181,25 @@ npm run dev
 
 | Domain | Account | Scenario |
 |---|---|---|
-| `example.com` | `acct_001` | Expires in ~365 days — healthy, auto-renew on |
-| `urgent-renew.io` | `acct_001` | Expires in ~4 days — critical window, auto-renew on |
-| `plenty-of-time.dev` | `acct_002` | Expires in ~29 days — urgent but not critical |
+| `example.com` | `acct_001` | Healthy, far from expiry, auto-renew on |
+| `urgent-renew.io` | `acct_001` | Expires within days — critical window, auto-renew on |
+| `plenty-of-time.dev` | `acct_002` | Expires in about a month — urgent but not critical |
 | `manual-only.com` | `acct_002` | Auto-renew OFF, expired — only manual renewal works |
 | `cant-afford.net` | `acct_003` | Low balance — payment step fails gracefully |
-| `test-renewal.com` | `acct_001` | Expires in ~365 days — healthy baseline |
+| `test-renewal.com` | `acct_001` | Healthy baseline |
+
+### Failure-path test hooks
+
+The registry simulator reacts to substrings in the domain name, so you can exercise each path from the chat or API:
+
+| Name contains | Simulated registry behavior |
+|---|---|
+| `registry-down` | EPP 2400 (command failed): trips the circuit breaker |
+| `registry-auth` | EPP 2501 (authentication error): opens the breaker immediately, no retries |
+| `registry-error` | EPP 2304 (status prohibits operation): fails that domain only, breaker untouched |
+| `already-renewed` | Registry already shows an extended expiry: exercises the EPP info guard |
+
+Register the domain first (`POST /domains`), then renew it.
 
 ## Project Structure
 
@@ -193,6 +211,7 @@ src/
 ├── renewal-workflow.ts      # Workflow: 5-step durable renewal execution
 ├── registry-simulator.ts    # Simulated EPP registry (with failure modes)
 ├── registry-circuit-breaker.ts  # Circuit breaker DO: per-TLD fail-fast
+├── epp-errors.ts            # EPP result-code classification (infra / domain / auth)
 ├── types.ts                 # Shared TypeScript interfaces
 ├── schema.sql               # D1 table definitions
 └── seed.sql                 # Test data
@@ -220,3 +239,5 @@ See [DECISIONS.md](./DECISIONS.md) for detailed architectural decision records c
 - Why Queues sit between triggers and Workflows
 - Circuit breaker as a Durable Object vs. KV
 - Workers AI for the ops agent vs. external LLM APIs
+- EPP error classification: which failures may trip the shared breaker
+- Checking the circuit breaker before taking payment

@@ -2,6 +2,8 @@
 
 ## Happy Path: Auto-Renewal via DO Alarm
 
+The circuit breaker is consulted twice. Step 1b is a read-only peek, so a known outage doesn't cost the customer a charge. Step 3a is the real gate: it is the call that moves an expired OPEN breaker to HALF_OPEN and lets a single probe through to the registry.
+
 ```
 ┌──────┐  ┌──────────┐  ┌─────┐  ┌────────┐   ┌────────┐  ┌─────────┐  ┌────┐
 │  DO  │  │  Queue   │  │ WF  │  │Circuit │   │Registry│  │    D1   │  │ DO │
@@ -20,12 +22,17 @@
    │           │           │        domain record + idemp check│         │
    │           │           │◀───────────────────────────────── │         │
    │           │           │         │            │            │         │
+   │           │           │ Step 1b: Peek breaker (read-only) │         │
+   │           │           │────────▶│            │            │         │
+   │           │           │ allowed │            │            │         │
+   │           │           │◀────────│            │            │         │
+   │           │           │         │            │            │         │
    │           │           │ Step 2: Process payment           │         │
    │           │           │─────────────────────────────────▶ │         │
    │           │           │        deduct balance             │         │
    │           │           │◀───────────────────────────────── │         │
    │           │           │         │            │            │         │
-   │           │           │ Step 3a: Check circuit breaker    │         │
+   │           │           │ Step 3a: Breaker gate (+probe)    │         │
    │           │           │────────▶│            │            │         │
    │           │           │ allowed │            │            │         │
    │           │           │◀────────│            │            │         │
@@ -53,7 +60,9 @@
    │           │           │  Done   │            │            │         │
 ```
 
-## Failure Path: Registry Down → Refund → Dead Letter
+## Failure Path: Registry Fails After Payment → Refund → Dead Letter
+
+The breaker was still CLOSED at the pre-flight (the outage hadn't been reported yet), so payment was taken. This is the case the refund and dead-letter path exists for.
 
 ```
 ┌──────┐  ┌─────┐  ┌────────┐  ┌────────┐   ┌─────────┐
@@ -82,17 +91,49 @@
    │         │         │           │             │
    │         │ ══════ ALL RETRIES EXHAUSTED ════ │
    │         │         │           │             │
-   │         │ Step 3a: Refund payment           │
+   │         │ Then: refund payment              │
    │         │──────────────────────────────────▶│
    │         │         │    +$12.99 to balance   │
    │         │         │           │             │
-   │         │ Step 3b: Dead-letter record       │
+   │         │ Then: dead-letter record          │
    │         │──────────────────────────────────▶│
    │         │         │   INSERT dead_letter    │
    │         │         │   UPDATE history=failed │
    │         │         │           │             │
    │         │   Return failure    │             │
    │         │  "Payment refunded. Dead-lettered."
+```
+
+## Breaker Already OPEN: Wait, Don't Charge
+
+Once failures have opened the breaker, new renewals are held before payment.
+
+```
+┌──────┐  ┌─────┐  ┌────────┐  ┌─────────┐
+│Queue │  │ WF  │  │Circuit │  │    D1   │
+└──┬───┘  └──┬──┘  └───┬────┘  └────┬────┘
+   │         │         │            │
+   │dequeue  │         │            │
+   │────────▶│         │            │
+   │         │ Step 1: Eligibility ✓│
+   │         │         │            │
+   │         │ Step 1b: peek        │
+   │         │────────▶│            │
+   │         │ OPEN, retry in 89s   │
+   │         │◀────────│            │
+   │         │                      │
+   │         │ step.sleep (durable; free while waiting)
+   │         │                      │
+   │         │ peek again           │
+   │         │────────▶│            │
+   │         │ allowed (cooldown over)
+   │         │◀────────│            │
+   │         │ continue → Step 2: payment → Step 3 (real probe)
+   │         │                      │
+   │   ─ ─ if still OPEN after 3 waits ─ ─
+   │         │ record "customer not charged"
+   │         │─────────────────────▶│
+   │         │ Return failure; next trigger retries
 ```
 
 ## Circuit Breaker State Transitions
@@ -105,8 +146,8 @@
               │ (healthy) │          │ (healthy) │
               └─────┬─────┘          └───────────┘
                     │                      ▲
-          5 consecutive                    │
-            failures                  test request
+          3 failures                       │
+         within 5 min                 test request
                     │                  succeeds
                     ▼                      │
               ┌───────────┐          ┌─────┴─────┐

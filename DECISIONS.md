@@ -67,6 +67,8 @@ Key design decisions made while building the domain renewal system, with context
 - **Registry first, then payment:** If registry succeeds but payment fails, you've extended a domain the customer can't pay for. Clawing back a domain extension is operationally much harder than processing a refund.
 - **Two-phase commit:** Not feasible across an EPP registry and a billing system.
 
+**Note:** ADR-009 adds a read-only circuit breaker check *before* payment, so known outages don't cause charge-and-refund churn. The ordering decision here (payment before the renew call) is unchanged.
+
 **Trade-offs accepted:**
 - (+) Failed registry → automatic refund is a clean, well-understood recovery path
 - (+) Dead-letter table captures these cases for manual investigation
@@ -122,3 +124,37 @@ Key design decisions made while building the domain renewal system, with context
 - (+) Client-side SDK available for parsing (though we use a custom parser for the styled cards)
 - (-) Additional dependency
 - (-) The data stream format requires understanding prefix codes (`0:` text, `9:` tool call, `a:` tool result)
+
+## ADR-008: Classify EPP Errors Before Counting Them Against the Circuit Breaker
+
+**Context:** The circuit breaker is shared by every domain in a TLD. Counting every failed renewal against it means a handful of bad domains (not found, status prohibits operation) could open the circuit for a healthy registry. Meanwhile real outages such as timeouts were never reported to it.
+
+**Decision:** Classify each EPP failure by result code (`classifyEppError`). Infrastructure codes (2400, 2500, 2502) and thrown timeouts trip the breaker and retry with backoff. Auth failures (2501) open the circuit immediately and don't retry, since repeated bad logins can lock the account. Everything else, including unrecognised codes, is a domain-level error: it fails that one renewal without touching shared state and without retrying.
+
+**Alternatives considered:**
+- **Count every failure:** Simple, but one bad batch of domains can block a whole TLD.
+- **Per-operation breakers (renew vs. info):** Handles partial outages better; deferred as a refinement.
+
+**Trade-offs accepted:**
+- (+) Breaker state reflects registry health, not data quality
+- (+) Rejected domains skip pointless retries and go straight to refund and dead-letter
+- (-) The code mapping is registry-specific (e.g. Nominet's 2400 includes a nightly maintenance window); production would need per-registry configuration
+- (-) Defaulting unknown codes to "domain" means a novel outage code won't trip the breaker until it's added
+
+## ADR-009: Check the Circuit Breaker Before Taking Payment
+
+**Context:** Payment-before-registry (ADR-004) is the right ordering for the money and the extension. But the circuit-breaker check sat after the payment step, so during an outage every renewal charged the customer, failed fast, retried, and refunded minutes later. Testing showed roughly $140 held across 11 in-flight renewals for one account while the breaker was open.
+
+**Decision:** Add a read-only circuit breaker pre-flight (`peekRegistry`) before payment. It reads recorded state from recent outcomes and never contacts the registry, so it only knows about failures other renewals have already reported. If the breaker is blocking, the workflow does a durable `step.sleep` for the remaining cooldown and re-checks, up to 3 times, then exits with the renewal marked failed and the customer not charged. The in-step `checkRegistry()` before the EPP call is unchanged: it still performs the HALF_OPEN transition and probe, and the refund and dead-letter path still covers failures between the pre-flight and the renew call.
+
+**Alternatives considered:**
+- **Leave as-is and rely on refunds:** Correct, but customers see pending charges during every outage.
+- **Reuse `checkRegistry()` as the pre-flight:** Rejected, it mutates state and would consume the single HALF_OPEN test slot.
+
+**Trade-offs accepted:**
+- (+) No charge-and-refund churn once the breaker is open
+- (+) Waiting is a durable sleep, so it costs nothing while the registry is down
+- (-) One extra Durable Object call per renewal, and a hot spot on busy TLDs (mitigation: cache breaker state briefly)
+- (-) When the cooldown ends, waiting workflows wake together; one gets the probe and the rest can still be blocked after paying (they take the refund path). Jittered waits would soften this.
+- (-) The first few failures before the breaker opens still charge and refund, which is bounded by the threshold
+
