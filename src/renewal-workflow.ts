@@ -26,18 +26,13 @@
  */
 
 import { WorkflowEntrypoint, WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import type { Env, DomainRecord, AccountRecord, RenewalResult } from "./types";
+import type { Env, DomainRecord, AccountRecord, RenewalResult, RenewalMessage } from "./types";
+import { NonRetryableError } from "cloudflare:workflows";
 import { eppRenew, eppInfo } from "./registry-simulator";
+import { classifyEppError } from "./epp-errors";
 
-interface RenewalParams {
-  domainName: string;
-  action: string;
-  triggerSource: string;
-  idempotencyKey: string;
-}
-
-export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalParams> {
-  async run(event: WorkflowEvent<RenewalParams>, step: WorkflowStep): Promise<RenewalResult> {
+export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalMessage> {
+  async run(event: WorkflowEvent<RenewalMessage>, step: WorkflowStep): Promise<RenewalResult> {
     const { domainName, action, triggerSource, idempotencyKey } = event.payload;
 
     // ── Step 1: Check eligibility + idempotency guard ──────────────
@@ -78,6 +73,48 @@ export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalParams> {
     }
 
     const domain = domainInfo.domain;
+
+    // ── Step 1b: Circuit breaker pre-flight (before taking any money) ──
+    // If the circuit breaker already records this TLD's registry as failing, don't
+    // charge the customer just to refund them minutes later. Wait out the
+    // cooldown with a durable sleep (free while sleeping), then re-check.
+    // This reads recorded state only (peekRegistry); it never contacts the registry.
+    // The real probe still happens in step 3.
+    const tld = domainName.split(".").pop() ?? "unknown";
+    const MAX_BREAKER_WAITS = 3;
+    const MAX_WAIT_MS = 5 * 60 * 1000;
+
+    for (let attempt = 0; ; attempt++) {
+      const breakerState = await step.do(`check-circuit-breaker-${attempt}`, async () => {
+        const breaker = this.env.REGISTRY_BREAKER.get(this.env.REGISTRY_BREAKER.idFromName(tld));
+        return await breaker.peekRegistry();
+      });
+
+      if (breakerState.allowed) break;
+
+      if (attempt >= MAX_BREAKER_WAITS) {
+        await step.do("record-registry-unavailable", async () => {
+          await this.env.DB.prepare(
+            `UPDATE renewal_history SET status = 'failed', error_message = ?1, completed_at = ?2
+             WHERE idempotency_key = ?3`
+          ).bind(
+            `Registry unavailable for .${tld} (circuit ${breakerState.status}); customer was not charged`,
+            Date.now(),
+            idempotencyKey
+          ).run();
+        });
+        return {
+          success: false,
+          domain: domainName,
+          error: `Registry unavailable for .${tld}. Not charged; will be retried by the next trigger.`,
+        };
+      }
+
+      await step.sleep(
+        `wait-for-circuit-${attempt}`,
+        Math.min((breakerState.retryAfterMs ?? 30_000) + 1_000, MAX_WAIT_MS)
+      );
+    }
 
     // ── Step 2: Process payment ────────────────────────────────────
     const paymentResult = await step.do(
@@ -148,7 +185,6 @@ export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalParams> {
         },
         async () => {
           // ── Circuit breaker: fail fast if registry is known to be down ──
-          const tld = domainName.split('.').pop() ?? "unknown";
           const breakerId = this.env.REGISTRY_BREAKER.idFromName(tld);
           const breaker = this.env.REGISTRY_BREAKER.get(breakerId);
           const circuitCheck = await breaker.checkRegistry();
@@ -159,11 +195,12 @@ export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalParams> {
 
           // ── EPP Info guard: check current state before renewing ──
           console.log(`[Workflow] Checking registry state for ${domainName} before renew...`);
-          const currentState = await eppInfo(domainName);
+          const currentState = await eppInfo(domainName, domain.expires_at);
 
           if (!currentState.exists) {
-            await breaker.reportFailure(`Domain ${domainName} not found at registry`);
-            throw new Error(`Domain ${domainName} not found at registry`);
+            // Domain-level data problem, not a registry outage — don't count it
+            // against the TLD-wide circuit breaker.
+            throw new NonRetryableError(`Domain ${domainName} not found at registry`);
           }
 
           // If expiry is already beyond what we'd set, a previous attempt succeeded
@@ -181,11 +218,34 @@ export class RenewalWorkflow extends WorkflowEntrypoint<Env, RenewalParams> {
 
           // ── Safe to renew ──
           console.log(`[Workflow] Registry confirms ${domainName} needs renewal. Sending EPP renew...`);
-          const result = await eppRenew(domainName, 1);
+          let result;
+          try {
+            result = await eppRenew(domainName, 1, domain.expires_at);
+          } catch (err) {
+            // Thrown errors (timeouts, network) indicate registry health problems
+            // and count toward the TLD-wide breaker.
+            await breaker.reportFailure(err instanceof Error ? err.message : String(err));
+            throw err;
+          }
 
           if (!result.success) {
-            await breaker.reportFailure(`EPP renew failed: ${result.errorCode} - ${result.errorMessage}`);
-            throw new Error(`EPP renew failed: ${result.errorCode} - ${result.errorMessage}`);
+            const message = `EPP renew failed: ${result.errorCode} - ${result.errorMessage}`;
+            switch (classifyEppError(result.errorCode)) {
+              case "infra":
+                // Registry unhealthy: counts toward the breaker, retried with backoff.
+                await breaker.reportFailure(message);
+                throw new Error(message);
+              case "auth":
+                // Our credentials were rejected: open the circuit now and don't retry
+                // (repeated bad logins can lock the account). Needs a human.
+                await breaker.reportFailure(message, true);
+                throw new NonRetryableError(message);
+              default:
+                // The registry answered and rejected this domain's request (e.g. 2304).
+                // It is up, so don't count it as a failure, and retrying can't help.
+                await breaker.reportSuccess();
+                throw new NonRetryableError(message);
+            }
           }
 
           // Registry call succeeded — report to circuit breaker

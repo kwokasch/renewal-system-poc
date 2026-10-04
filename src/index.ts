@@ -174,7 +174,7 @@ export default {
 
       try {
         const instance = await env.RENEWAL_WORKFLOW.create({
-          id: idempotencyKey,
+          id: await workflowInstanceId(idempotencyKey),
           params: {
             domainName,
             action,
@@ -197,6 +197,21 @@ export default {
     }
   },
 };
+
+/**
+ * Workflow instance IDs only allow letters, digits, "_" and "-" (max 64 chars),
+ * but idempotency keys embed the domain name (which contains dots). Derive a
+ * valid, deterministic ID from the key: same key -> same ID, so Workflow-level
+ * dedup still works. The hash suffix keeps IDs unique even when sanitising
+ * collapses different characters to the same one (e.g. "a.b" vs "a_b").
+ * The original key is still what's stored in renewal_history.
+ */
+async function workflowInstanceId(idempotencyKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(idempotencyKey));
+  const hash = [...new Uint8Array(digest)].slice(0, 4).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const readable = idempotencyKey.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
+  return `${readable}-${hash}`;
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // REST API Handlers

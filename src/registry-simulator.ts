@@ -16,7 +16,8 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 export async function eppRenew(
   domainName: string,
-  years: number = 1
+  years: number = 1,
+  currentExpiry: number = Date.now()
 ): Promise<EppRenewResponse> {
   // Simulate network latency (50-500ms)
   const latency = Math.floor(Math.random() * 450) + 50;
@@ -41,8 +42,19 @@ export async function eppRenew(
     };
   }
 
+  // Test hooks: domain names containing these strings simulate specific EPP results
+  const simulated: Array<[string, string, string]> = [
+    ["registry-down", "2400", "Command failed"],
+    ["registry-auth", "2501", "Authentication error; server closing connection"],
+  ];
+  for (const [marker, errorCode, errorMessage] of simulated) {
+    if (domainName.includes(marker)) {
+      return { success: false, domainName, newExpiryDate: 0, transactionId, errorCode, errorMessage };
+    }
+  }
+
   // Success: extend expiry by requested years
-  const currentExpiry = Date.now(); // In production, read from registry info response
+  // Registries add the term to the CURRENT expiry (remaining days aren't lost)
   const newExpiryDate = currentExpiry + years * ONE_YEAR_MS;
 
   return {
@@ -58,7 +70,7 @@ export async function eppRenew(
  * Critical for the "unknown is a real state" pattern:
  * when a renew response is lost, query info before retrying.
  */
-export async function eppInfo(domainName: string): Promise<{
+export async function eppInfo(domainName: string, knownExpiry: number = Date.now()): Promise<{
   exists: boolean;
   expiryDate: number | null;
   status: string[];
@@ -66,10 +78,16 @@ export async function eppInfo(domainName: string): Promise<{
   const latency = Math.floor(Math.random() * 200) + 50;
   await new Promise((r) => setTimeout(r, latency));
 
-  // Simulate: domain exists and is active
+  // Test hook: simulates "a previous renew succeeded but we crashed before
+  // recording it" — the registry already shows an extended expiry.
+  if (domainName.includes("already-renewed")) {
+    return { exists: true, expiryDate: knownExpiry + ONE_YEAR_MS, status: ["ok"] };
+  }
+
+  // Normally the registry agrees with our records: same expiry we have on file.
   return {
     exists: true,
-    expiryDate: Date.now() + ONE_YEAR_MS,
+    expiryDate: knownExpiry,
     status: ["ok", "clientTransferProhibited"],
   };
 }

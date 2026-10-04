@@ -51,3 +51,9 @@ export interface EppRenewResponse {
   errorCode?: string;
   errorMessage?: string;
 }
+
+// How an EPP failure should be treated (see epp-errors.ts)
+export type EppErrorClass =
+  | "infra"   // registry unhealthy: trip breaker, retry with backoff
+  | "domain"  // this domain/request is the problem: don't trip, don't retry
+  | "auth";   // our credentials rejected: trip breaker immediately, alert a human, don't retry
